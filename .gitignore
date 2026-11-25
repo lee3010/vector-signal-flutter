@@ -1,0 +1,11 @@
+.dart_tool/
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+pubspec.lock
+.gradle/
+local.properties
+*.iml
+.idea/
+.vscode/
+.DS_Store

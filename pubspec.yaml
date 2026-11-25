@@ -1,0 +1,29 @@
+name: vector_signal_flutter
+description: Flutter SDK for Vector Signal mobile UX analytics - screens, taps, API calls, errors and masked session replay.
+repository: https://github.com/lee3010/vector-signal-flutter
+version: 0.2.0
+publish_to: 'none'
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+  flutter: '>=3.13.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  dio: ^5.4.0
+  path_provider: ^2.1.0
+  shared_preferences: ^2.2.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  # Android part: VectorSignalOkHttpInterceptor for apps that call their API from Kotlin.
+  plugin:
+    platforms:
+      android:
+        package: com.vectorsignal.flutter
+        pluginClass: VectorSignalPlugin
