@@ -7,6 +7,7 @@ export 'src/error_capture.dart' show ErrorCapture;
 export 'src/http_capture.dart' show VectorSignalDioInterceptor;
 export 'src/observer.dart';
 export 'src/property_guard.dart';
+export 'src/remote_settings.dart';
 export 'src/replay.dart';
 export 'src/session.dart';
 export 'src/storage.dart';

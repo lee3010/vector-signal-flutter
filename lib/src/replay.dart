@@ -21,7 +21,8 @@ import 'client.dart';
 /// visible. Wrap anything else sensitive in [VSMask]; wrap content that is
 /// safe to show in [VSUnmask].
 class ReplayConfig {
-  /// Share of sessions recorded in full, 0..1.
+  /// Share of sessions recorded in full, 0..1. With remote settings (the
+  /// default) both rates come from the project's settings on the dashboard.
   final double sampleRate;
 
   /// Share of the other sessions that keep the last [bufferDuration] of
@@ -80,6 +81,24 @@ class ReplayConfig {
     this.maxWidth = 360,
     this.quality = 50,
   });
+
+  /// This config with other sampling rates (from the project's settings).
+  ReplayConfig withRates(
+          {required double sampleRate, required double onStruggleSampleRate}) =>
+      ReplayConfig(
+        sampleRate: sampleRate,
+        onStruggleSampleRate: onStruggleSampleRate,
+        bufferDuration: bufferDuration,
+        maskAllText: maskAllText,
+        maskImages: maskImages,
+        minInterval: minInterval,
+        activeWindow: activeWindow,
+        idleInterval: idleInterval,
+        idleStopAfter: idleStopAfter,
+        maxFramesPerSession: maxFramesPerSession,
+        maxWidth: maxWidth,
+        quality: quality,
+      );
 }
 
 /// Always covers [child] in session replay, whatever the masking settings.

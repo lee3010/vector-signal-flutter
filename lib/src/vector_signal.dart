@@ -6,6 +6,7 @@ import 'package:flutter/widgets.dart';
 import 'client.dart';
 import 'error_capture.dart';
 import 'http_capture.dart';
+import 'remote_settings.dart';
 import 'replay.dart';
 import 'storage.dart';
 import 'struggle_watcher.dart';
@@ -22,6 +23,17 @@ class VectorSignal {
   static ReplayRecorder? _replay;
   static ReplayUploader? _replayUploader;
   static StruggleWatcher? _struggleWatcher;
+  static VectorSignalStorage? _storage;
+  static VectorSignalSettingsSource? _settingsSource;
+  static ReplayConfig _replayTemplate = const ReplayConfig();
+  static ProjectSettings? _settings;
+  static DateTime? _settingsFetchedAt;
+  static bool _fetchingSettings = false;
+  static String _writeKey = '';
+  static String _host = '';
+
+  /// Settings are fetched again when the app comes back after this long.
+  static const Duration settingsRefreshInterval = Duration(minutes: 30);
 
   /// The area session replay captures. [VectorSignalTapCapture] places it
   /// around the app, so wrapping the app in that widget is all that's needed.
@@ -34,10 +46,20 @@ class VectorSignal {
   /// The session-replay recorder, or null when replay is off. For tests and diagnostics.
   static ReplayRecorder? get replay => _replay;
 
+  /// The project's settings in use (saved or fetched), or null before they
+  /// were ever loaded. For tests and diagnostics.
+  static ProjectSettings? get settings => _settings;
+
   /// Starts the SDK. Call once, after `WidgetsFlutterBinding.ensureInitialized()`.
   ///
   /// [writeKey] is the project's public write key (it can only send events).
   /// [host] is the Vector Signal API base URL, e.g. `https://signal.example.com`.
+  ///
+  /// Session replay is controlled on the dashboard (Project settings): the
+  /// SDK reads the project's settings at start-up and uses the last saved
+  /// ones until fresh ones arrive; replay stays off until they were loaded
+  /// once. [replay] only tunes masking and capture timing. Set
+  /// [remoteSettings] to false to use the rates in [replay] instead.
   static Future<void> init({
     required String writeKey,
     required String host,
@@ -52,10 +74,16 @@ class VectorSignal {
     bool captureErrors = true,
     bool captureNativeApi = true,
     ReplayConfig? replay,
+    bool remoteSettings = true,
+    VectorSignalSettingsSource? settingsSource,
   }) async {
     if (_client != null) return;
     try {
       WidgetsFlutterBinding.ensureInitialized();
+      final store = storage ?? DefaultVectorSignalStorage();
+      _storage = store;
+      _writeKey = writeKey;
+      _host = host;
       final client = VectorSignalClient(
         config: VectorSignalConfig(
           sampleRate: sampleRate,
@@ -67,7 +95,7 @@ class VectorSignal {
           maxQueueSize: maxQueueSize,
         ),
         transport: transport ?? HttpTransport(writeKey: writeKey, host: host),
-        storage: storage ?? DefaultVectorSignalStorage(),
+        storage: store,
       );
       await client.start();
       _client = client;
@@ -91,24 +119,17 @@ class VectorSignal {
 
       // Session replay: masked frames. Sampled sessions are recorded in full;
       // the others keep the last minute on the device and send it only when
-      // a struggle happens.
-      if (replay != null &&
-          (replay.sampleRate > 0 || replay.onStruggleSampleRate > 0)) {
-        final uploader = ReplayUploader(writeKey: writeKey, host: host);
-        _replayUploader = uploader;
-        _replay = ReplayRecorder(
-          config: replay,
-          client: client,
-          uploader: uploader,
-          boundaryKey: replayBoundaryKey,
-        )..start();
-        _lifecycle!.replay = _replay;
-        _lifecycle!.replayUploader = uploader;
-        if (replay.onStruggleSampleRate > 0) {
-          final watcher = StruggleWatcher((_) => _replay?.onStruggle());
-          _struggleWatcher = watcher;
-          client.onEvent = watcher.onEvent;
-        }
+      // a struggle happens. The rates come from the project's settings.
+      _replayTemplate = replay ?? const ReplayConfig();
+      if (remoteSettings) {
+        _settingsSource = settingsSource ??
+            HttpSettingsSource(writeKey: writeKey, host: host);
+        final saved = await ProjectSettings.load(store);
+        if (saved != null) _applySettings(saved);
+        _lifecycle!.onResume = _refreshSettingsIfStale;
+        unawaited(refreshSettings());
+      } else if (replay != null) {
+        _startReplay(replay);
       }
 
       if (kDebugMode) {
@@ -197,6 +218,92 @@ class VectorSignal {
     }
   }
 
+  /// Loads the project's settings now and applies them: replay turned off on
+  /// the dashboard stops at once; turned on, it starts. New rates for a
+  /// running recorder apply from the next app start, so a session never
+  /// changes how it is recorded halfway.
+  static Future<void> refreshSettings() async {
+    final source = _settingsSource;
+    final store = _storage;
+    if (source == null || store == null || _fetchingSettings) return;
+    _fetchingSettings = true;
+    try {
+      final fresh = await source.fetch();
+      if (fresh == null || _settingsSource != source) return;
+      _settingsFetchedAt = DateTime.now();
+      await fresh.save(store);
+      _applySettings(fresh);
+    } catch (_) {
+      // Keep the saved settings.
+    } finally {
+      _fetchingSettings = false;
+    }
+  }
+
+  static void _refreshSettingsIfStale() {
+    final last = _settingsFetchedAt;
+    if (last == null ||
+        DateTime.now().difference(last) >= settingsRefreshInterval) {
+      unawaited(refreshSettings());
+    }
+  }
+
+  static void _applySettings(ProjectSettings settings) {
+    _settings = settings;
+    final replay = settings.replay;
+    if (!replay.records) {
+      _stopReplay(flush: true);
+    } else if (_replay == null) {
+      _startReplay(_replayTemplate.withRates(
+        sampleRate: replay.sampleRate,
+        onStruggleSampleRate: replay.onStruggleSampleRate,
+      ));
+    }
+  }
+
+  static void _startReplay(ReplayConfig config) {
+    final client = _client;
+    final lifecycle = _lifecycle;
+    if (client == null || lifecycle == null) return;
+    if (config.sampleRate <= 0 && config.onStruggleSampleRate <= 0) return;
+    final uploader = ReplayUploader(writeKey: _writeKey, host: _host);
+    _replayUploader = uploader;
+    final recorder = ReplayRecorder(
+      config: config,
+      client: client,
+      uploader: uploader,
+      boundaryKey: replayBoundaryKey,
+    );
+    _replay = recorder;
+    lifecycle.replay = recorder;
+    lifecycle.replayUploader = uploader;
+    if (config.onStruggleSampleRate > 0) {
+      final watcher = StruggleWatcher((_) => _replay?.onStruggle());
+      _struggleWatcher = watcher;
+      client.onEvent = watcher.onEvent;
+    }
+    if (!lifecycle.inBackground) recorder.start();
+  }
+
+  static void _stopReplay({required bool flush}) {
+    _struggleWatcher?.dispose();
+    _struggleWatcher = null;
+    _client?.onEvent = null;
+    _replay?.stop();
+    _replay = null;
+    final uploader = _replayUploader;
+    _replayUploader = null;
+    if (uploader != null) {
+      if (flush) {
+        unawaited(uploader.flush().whenComplete(uploader.dispose));
+      } else {
+        uploader.dispose();
+      }
+    }
+    _lifecycle?.replay = null;
+    _lifecycle?.replayUploader = null;
+  }
+
   /// Sends queued events now.
   static Future<void> flush() async {
     try {
@@ -215,12 +322,12 @@ class VectorSignal {
   @visibleForTesting
   static void shutdown() {
     unawaited(NativeApiBridge.stop());
-    _struggleWatcher?.dispose();
-    _struggleWatcher = null;
-    _replay?.stop();
-    _replay = null;
-    _replayUploader?.dispose();
-    _replayUploader = null;
+    _stopReplay(flush: false);
+    _settingsSource = null;
+    _settings = null;
+    _settingsFetchedAt = null;
+    _fetchingSettings = false;
+    _storage = null;
     _errorCapture?.uninstall();
     _errorCapture = null;
     if (_lifecycle != null) {
@@ -236,7 +343,10 @@ class _LifecycleObserver with WidgetsBindingObserver {
   final VectorSignalClient client;
   ReplayRecorder? replay;
   ReplayUploader? replayUploader;
+  void Function()? onResume;
   bool _inBackground = false;
+
+  bool get inBackground => _inBackground;
 
   _LifecycleObserver(this.client);
 
@@ -256,6 +366,7 @@ class _LifecycleObserver with WidgetsBindingObserver {
         _inBackground = false;
         client.enqueue(VectorSignalEvents.appOpen);
         replay?.start();
+        onResume?.call();
       case AppLifecycleState.inactive:
       case AppLifecycleState.detached:
         break;

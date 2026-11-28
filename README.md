@@ -14,7 +14,7 @@ dependencies:
   vector_signal_flutter:
     git:
       url: https://github.com/lee3010/vector-signal-flutter.git
-      ref: v0.2.0
+      ref: v0.4.0
 ```
 
 Flutter 3.13 or newer. Android adds a small native part (API capture for OkHttp, fast
@@ -98,20 +98,30 @@ Uncaught Flutter and platform errors are recorded as `$error` (type plus a short
 Handlers installed before `init`, such as Crashlytics, keep working. Turn off with
 `captureErrors: false`.
 
-## Session replay (optional, off by default)
+## Session replay (off until turned on in the dashboard)
 
-```dart
-await VectorSignal.init(..., replay: const ReplayConfig(sampleRate: 0.1, onStruggleSampleRate: 1));
-```
+Turn it on in the dashboard: **Project settings, Session replay**. No app change or new
+release is needed: the SDK reads the project's settings at start-up (and again when the app
+comes back after 30 minutes), keeps them on the device for offline starts, and replay stays
+off until they were loaded once. Turned off in the dashboard, recording stops right away;
+new percentages apply from the next app start.
 
 Two kinds of recording, decided once per session:
 
-- **In full** (`sampleRate`, default 0.1): frames are sent as the session happens.
-- **On struggle** (`onStruggleSampleRate`, default 1): the other sessions keep the last
-  minute (`bufferDuration`) on the device. When a struggle happens (rage tap, dead tap, app
-  error, failed API, or an API slower than 3 s), those frames are sent and the rest of the
-  session is recorded in full. Sessions without a struggle send no frames at all.
-  Set it to 0 to record only the `sampleRate` sessions.
+- **In full** (dashboard: "Record in full"): frames are sent as the session happens.
+- **On struggle** (dashboard: "Record on struggle"): the other sessions keep the last
+  minute on the device. When a struggle happens (rage tap, dead tap, app error, failed
+  API, or an API slower than 3 s), those frames are sent and the rest of the session is
+  recorded in full. Sessions without a struggle send no frames at all.
+
+`ReplayConfig` tunes masking and capture timing only:
+
+```dart
+await VectorSignal.init(..., replay: const ReplayConfig(maskImages: true));
+```
+
+To set the percentages in code instead of the dashboard, pass `remoteSettings: false` and
+`ReplayConfig(sampleRate: 0.1, onStruggleSampleRate: 1)`.
 
 - **Masked on the device, before upload:** all text, text fields and custom-painted areas
   (charts) are covered. Icons stay visible. Wrap anything else sensitive in `VSMask`; wrap

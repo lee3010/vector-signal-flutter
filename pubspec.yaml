@@ -1,7 +1,7 @@
 name: vector_signal_flutter
 description: Flutter SDK for Vector Signal mobile UX analytics - screens, taps, API calls, errors and masked session replay.
 repository: https://github.com/lee3010/vector-signal-flutter
-version: 0.3.0
+version: 0.4.0
 publish_to: 'none'
 
 environment:
