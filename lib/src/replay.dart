@@ -21,8 +21,18 @@ import 'client.dart';
 /// visible. Wrap anything else sensitive in [VSMask]; wrap content that is
 /// safe to show in [VSUnmask].
 class ReplayConfig {
-  /// Share of sessions recorded, 0..1.
+  /// Share of sessions recorded in full, 0..1.
   final double sampleRate;
+
+  /// Share of the other sessions that keep the last [bufferDuration] of
+  /// frames on the device and send them only when a struggle happens (rage
+  /// tap, dead tap, error, failed or slow API), then record the rest of the
+  /// session in full. 0..1; 1 = every session with a struggle has a replay.
+  /// Frames of sessions without a struggle never leave the device.
+  final double onStruggleSampleRate;
+
+  /// How much of the moments before a struggle is kept on the device.
+  final Duration bufferDuration;
 
   /// Cover all text (recommended for payment apps). When false, only text
   /// fields and [VSMask] areas are covered.
@@ -58,6 +68,8 @@ class ReplayConfig {
 
   const ReplayConfig({
     this.sampleRate = 0.1,
+    this.onStruggleSampleRate = 1.0,
+    this.bufferDuration = const Duration(seconds: 60),
     this.maskAllText = true,
     this.maskImages = false,
     this.minInterval = const Duration(seconds: 1),
@@ -197,7 +209,13 @@ class ReplayMasker {
   }
 }
 
-/// Captures masked frames of the app and hands them to [ReplayUploader].
+/// How a session is recorded: not at all, kept on the device until a struggle
+/// ([buffer]), or sent as it happens ([full]).
+enum ReplayMode { off, buffer, full }
+
+/// Captures masked frames of the app and hands them to [ReplayUploader]
+/// (full sessions), or keeps the last [ReplayConfig.bufferDuration] on the
+/// device until [onStruggle] (buffered sessions).
 class ReplayRecorder {
   final ReplayConfig config;
   final VectorSignalClient client;
@@ -218,7 +236,8 @@ class ReplayRecorder {
   final DateTime Function() _now;
   int? _lastHash;
   String? _sampledSessionId;
-  bool _sessionSampled = false;
+  ReplayMode _mode = ReplayMode.off;
+  final List<Map<String, dynamic>> _buffer = [];
   int _framesThisSession = 0;
   bool _frameCallbackAdded = false;
 
@@ -234,8 +253,35 @@ class ReplayRecorder {
         _random = random ?? Random(),
         _now = clock ?? DateTime.now;
 
-  /// Frames captured in the current session. For tests and diagnostics.
+  /// Frames sent (or queued to send) for the current session. For tests and diagnostics.
   int get framesThisSession => _framesThisSession;
+
+  /// Frames kept on the device for a buffered session. For tests and diagnostics.
+  int get bufferedFrames => _buffer.length;
+
+  /// How the current session is recorded. For tests and diagnostics.
+  ReplayMode get mode {
+    final sessionId = client.sessionId;
+    return sessionId == null ? ReplayMode.off : _modeFor(sessionId);
+  }
+
+  /// A struggle happened: a buffered session sends what it kept and records
+  /// the rest in full. [StruggleWatcher] calls this.
+  void onStruggle() {
+    final sessionId = client.sessionId;
+    if (!_running || sessionId == null) return;
+    if (_modeFor(sessionId) != ReplayMode.buffer) return;
+    _mode = ReplayMode.full;
+    _prune(_now());
+    for (final frame in _buffer) {
+      if (_framesThisSession >= config.maxFramesPerSession) break;
+      _framesThisSession++;
+      uploader.add(frame);
+    }
+    _buffer.clear();
+    unawaited(uploader.flush());
+    notifyInteraction(); // record what happens next closely
+  }
 
   /// True while recording is paused because nobody touched the screen for
   /// [ReplayConfig.idleStopAfter]. For tests and diagnostics.
@@ -310,21 +356,42 @@ class ReplayRecorder {
     });
   }
 
-  bool _isSampled(String sessionId) {
+  ReplayMode _modeFor(String sessionId) {
     if (_sampledSessionId != sessionId) {
       _sampledSessionId = sessionId;
-      _sessionSampled = _random.nextDouble() < config.sampleRate;
+      _mode = _random.nextDouble() < config.sampleRate
+          ? ReplayMode.full
+          : _random.nextDouble() < config.onStruggleSampleRate
+              ? ReplayMode.buffer
+              : ReplayMode.off;
       _framesThisSession = 0;
+      _buffer.clear();
       _lastHash = null;
     }
-    return _sessionSampled;
+    return _mode;
+  }
+
+  /// Keeps frames from the last [ReplayConfig.bufferDuration], plus the one
+  /// before (what was on screen when the window starts).
+  void _prune(DateTime now) {
+    final from = now.subtract(config.bufferDuration);
+    var keepFrom = 0;
+    for (var i = 0; i < _buffer.length; i++) {
+      if ((_buffer[i]['_at'] as DateTime).isBefore(from)) keepFrom = i;
+    }
+    if (keepFrom > 0) _buffer.removeRange(0, keepFrom);
+    if (_buffer.length > ReplayUploader.maxQueuedFrames) {
+      _buffer.removeRange(0, _buffer.length - ReplayUploader.maxQueuedFrames);
+    }
   }
 
   /// Captures one frame if the screen changed. Visible for tests.
   Future<void> captureNow() async {
     if (!_running || !_dirty || _capturing || !client.isActive) return;
     final sessionId = client.sessionId;
-    if (sessionId == null || !_isSampled(sessionId)) return;
+    if (sessionId == null) return;
+    final mode = _modeFor(sessionId);
+    if (mode == ReplayMode.off) return;
     if (_framesThisSession >= config.maxFramesPerSession) return;
 
     final boundary = boundaryKey.currentContext?.findRenderObject();
@@ -361,17 +428,23 @@ class ReplayRecorder {
         masked.dispose();
       }
       if (image == null) return;
-      _framesThisSession++;
-
-      uploader.add({
+      final at = _now();
+      final frame = {
         'sessionId': sessionId,
         'distinctId': client.distinctId,
-        'timestamp': _now().toUtc().toIso8601String(),
+        'timestamp': at.toUtc().toIso8601String(),
         'screen': client.currentScreen,
         'width': size.width.round(),
         'height': size.height.round(),
         'image': base64Encode(image),
-      });
+      };
+      if (_mode == ReplayMode.buffer) {
+        _buffer.add({...frame, '_at': at});
+        _prune(at);
+        return;
+      }
+      _framesThisSession++;
+      uploader.add(frame);
     } catch (_) {
       // e.g. a frame still being painted; the next change tries again.
       _dirty = true;
@@ -450,8 +523,12 @@ class ReplayEncoder {
 /// memory only (never written to disk) and the oldest are dropped when the
 /// buffer is full or the device is offline.
 class ReplayUploader {
-  static const int maxQueuedFrames = 20;
+  /// Room for about a minute of frames (what a struggle sends at once).
+  static const int maxQueuedFrames = 90;
   static const int sendAt = 5;
+
+  /// The server takes at most 30 frames per request.
+  static const int maxBatchFrames = 25;
   static const int _maxBatchChars = 3 * 1024 * 1024;
 
   final Dio _dio;
@@ -492,12 +569,16 @@ class ReplayUploader {
   Future<void> flush() async {
     if (_sending || _disabled || _queue.isEmpty) return;
     _sending = true;
+    var sent = false;
     try {
       final batch = <Map<String, dynamic>>[];
       var chars = 0;
       for (final f in _queue) {
         final size = (f['image'] as String).length;
-        if (batch.isNotEmpty && chars + size > _maxBatchChars) break;
+        if (batch.isNotEmpty &&
+            (chars + size > _maxBatchChars || batch.length >= maxBatchFrames)) {
+          break;
+        }
         batch.add(f);
         chars += size;
       }
@@ -514,6 +595,7 @@ class ReplayUploader {
       final code = response.statusCode ?? 0;
       if ((code >= 200 && code < 300) || code == 400 || code == 413) {
         _queue.removeRange(0, batch.length); // sent, or never acceptable
+        sent = true;
       } else if (code == 401 || code == 403 || code == 503) {
         _disabled = true; // wrong key, or replay off on this server
         _queue.clear();
@@ -527,6 +609,8 @@ class ReplayUploader {
     } finally {
       _sending = false;
     }
+    // A struggle can queue more than one batch: send the rest straight away.
+    if (sent && _queue.length >= sendAt) unawaited(flush());
   }
 
   void dispose() {

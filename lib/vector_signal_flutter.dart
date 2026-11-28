@@ -10,6 +10,7 @@ export 'src/property_guard.dart';
 export 'src/replay.dart';
 export 'src/session.dart';
 export 'src/storage.dart';
+export 'src/struggle_watcher.dart';
 export 'src/tap_capture.dart';
 export 'src/transport.dart';
 export 'src/vector_signal.dart';

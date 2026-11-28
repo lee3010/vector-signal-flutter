@@ -253,6 +253,105 @@ void main() {
     VectorSignal.shutdown();
   });
 
+  testWidgets(
+      'buffered session keeps frames on the device until a struggle, then sends them',
+      (tester) async {
+    await tester.runAsync(() => VectorSignal.init(
+          writeKey: 'test',
+          host: 'http://localhost',
+          transport: _NullTransport(),
+          storage: MemoryVectorSignalStorage(),
+          captureErrors: false,
+          captureNativeApi: false,
+        ));
+    final uploader = ReplayUploader(
+        writeKey: 'test',
+        host: 'http://localhost',
+        dio: Dio()..httpClientAdapter = _ReplayServer(200));
+    var now = DateTime(2026, 11, 28, 8);
+    final recorder = ReplayRecorder(
+      // Not sampled in full; every other session is buffered.
+      config: const ReplayConfig(sampleRate: 0, onStruggleSampleRate: 1),
+      client: VectorSignal.client!,
+      uploader: uploader,
+      boundaryKey: VectorSignal.replayBoundaryKey,
+      clock: () => now,
+    );
+
+    var label = 0;
+    late StateSetter setLabel;
+    await tester.pumpWidget(MaterialApp(
+      builder: (context, child) => VectorSignalTapCapture(child: child!),
+      home: Scaffold(
+        body: StatefulBuilder(builder: (context, setState) {
+          setLabel = setState;
+          return Container(
+              color: Color(0xFF000000 + label * 0x111111),
+              child: Text('$label'));
+        }),
+      ),
+    ));
+
+    VectorSignal.track('screen_ready');
+    recorder.start();
+    expect(recorder.mode, ReplayMode.buffer);
+
+    // Three different screens, 40 s apart: kept on the device, nothing sent.
+    for (var i = 1; i <= 3; i++) {
+      setLabel(() => label = i);
+      await tester.pump();
+      await tester.runAsync(recorder.captureNow);
+      now = now.add(const Duration(seconds: 40));
+    }
+    expect(uploader.queueLength, 0);
+    expect(recorder.bufferedFrames, 3);
+
+    // Struggle 120 s after the first frame: that frame is older than the 60 s
+    // window and isn't what was on screen when the window started, so only
+    // the last two frames are sent.
+    await tester.runAsync(() async {
+      recorder.onStruggle(); // also starts sending
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    });
+    expect(recorder.mode, ReplayMode.full);
+    expect(recorder.bufferedFrames, 0);
+    expect(recorder.framesThisSession, 2);
+    recorder.cancelPendingCapture();
+
+    // After the struggle, new frames go straight to the uploader.
+    setLabel(() => label = 4);
+    await tester.pump();
+    await tester.runAsync(recorder.captureNow);
+    expect(recorder.framesThisSession, 3);
+
+    recorder.stop();
+    uploader.dispose();
+    VectorSignal.shutdown();
+  });
+
+  test('uploader sends a large queue in batches the server accepts', () async {
+    final server = _ReplayServer(200);
+    final uploader = ReplayUploader(
+        writeKey: 'test',
+        host: 'http://localhost',
+        dio: Dio()..httpClientAdapter = server);
+    for (var i = 0; i < 60; i++) {
+      uploader.add({'image': 'AAAA', 'i': i});
+    }
+    // Let the chained flushes finish.
+    for (var i = 0; i < 100 && uploader.queueLength > 0; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      await uploader.flush();
+    }
+    expect(uploader.queueLength, 0);
+    expect(
+        server.bodies.every((b) => (b['frames'] as List).length <= 25), isTrue);
+    expect(
+        server.bodies.fold<int>(0, (n, b) => n + (b['frames'] as List).length),
+        60);
+    uploader.dispose();
+  });
+
   test('uploader stops for good when the server has replay off (503)',
       () async {
     final server = _ReplayServer(503);
@@ -273,7 +372,7 @@ void main() {
         writeKey: 'test',
         host: 'http://localhost',
         dio: Dio()..httpClientAdapter = _ReplayServer(500));
-    for (var i = 0; i < 30; i++) {
+    for (var i = 0; i < ReplayUploader.maxQueuedFrames + 10; i++) {
       uploader.add({'image': 'AAAA', 'i': i});
     }
     await uploader.flush();

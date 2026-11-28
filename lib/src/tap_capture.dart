@@ -90,7 +90,7 @@ class TapClassifier {
 }
 
 /// Wrap your app (e.g. in `MaterialApp.builder`) to record `$tap` events:
-/// position, current screen and the [VSLabel] under the finger, if any.
+/// position, screen size, current screen and the [VSLabel] under the finger, if any.
 /// It never reads any text from widgets.
 class VectorSignalTapCapture extends StatefulWidget {
   final Widget child;
@@ -120,10 +120,14 @@ class _VectorSignalTapCaptureState extends State<VectorSignalTapCapture> {
         if (down == null) return;
         if (TapClassifier.isTap(
             down.position, e.position, DateTime.now().difference(down.time))) {
+          final view = View.maybeOf(context);
           VectorSignal.recordTap(e.position,
               label: VSLabel.labelAt(e.position),
               target:
-                  TapTargetClassifier.classify(down.position, e.viewId).name);
+                  TapTargetClassifier.classify(down.position, e.viewId).name,
+              screenSize: view == null
+                  ? null
+                  : view.physicalSize / view.devicePixelRatio);
         }
       },
       // Session replay captures this area (only when replay is enabled).

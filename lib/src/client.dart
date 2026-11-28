@@ -86,6 +86,11 @@ class VectorSignalClient {
   int _failures = 0;
   DateTime? _nextAttemptAt;
   String? _currentScreen;
+
+  /// Called after each recorded event (on the device only; e.g. session
+  /// replay watches for struggles). Errors in it are ignored.
+  void Function(String name, Map<String, Object?>? properties, String? screen,
+      DateTime time)? onEvent;
   Timer? _flushTimer;
   Timer? _saveTimer;
   Future<void> _saveChain = Future.value();
@@ -207,6 +212,9 @@ class VectorSignalClient {
       });
       _trimQueue();
       _scheduleSave();
+      try {
+        onEvent?.call(eventName, properties, screen ?? _currentScreen, now);
+      } catch (_) {}
 
       if (_queue.length >= config.flushAt) {
         unawaited(flush());

@@ -63,8 +63,8 @@ MaterialApp(
 );
 ```
 
-Each tap records its position, the screen and what it hit (`button`, `toggle`, `text`,
-`none`), never any text. Only button taps with no visible effect count as dead taps. Give
+Each tap records its position, the screen size (for heatmaps), the screen and what it hit
+(`button`, `toggle`, `text`, `none`), never any text. Only button taps with no visible effect count as dead taps. Give
 important buttons a stable label:
 
 ```dart
@@ -101,8 +101,17 @@ Handlers installed before `init`, such as Crashlytics, keep working. Turn off wi
 ## Session replay (optional, off by default)
 
 ```dart
-await VectorSignal.init(..., replay: const ReplayConfig(sampleRate: 0.2));
+await VectorSignal.init(..., replay: const ReplayConfig(sampleRate: 0.1, onStruggleSampleRate: 1));
 ```
+
+Two kinds of recording, decided once per session:
+
+- **In full** (`sampleRate`, default 0.1): frames are sent as the session happens.
+- **On struggle** (`onStruggleSampleRate`, default 1): the other sessions keep the last
+  minute (`bufferDuration`) on the device. When a struggle happens (rage tap, dead tap, app
+  error, failed API, or an API slower than 3 s), those frames are sent and the rest of the
+  session is recorded in full. Sessions without a struggle send no frames at all.
+  Set it to 0 to record only the `sampleRate` sessions.
 
 - **Masked on the device, before upload:** all text, text fields and custom-painted areas
   (charts) are covered. Icons stay visible. Wrap anything else sensitive in `VSMask`; wrap
@@ -110,7 +119,7 @@ await VectorSignal.init(..., replay: const ReplayConfig(sampleRate: 0.2));
 - Small frames only when something changes: about 1 per second for a few seconds after a
   touch or screen change, at most 1 per 10 s while untouched, and nothing after 2 minutes
   without a touch. At most 600 frames per session. WebP on Android.
-- Frames are kept in memory only (never on the device's disk).
+- Frames are kept in memory only (never on the device's disk), at most about 90 at a time.
 - Tell your users: mention usage analytics and screen recording in your privacy policy.
 
 ## Sending and offline

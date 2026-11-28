@@ -8,6 +8,7 @@ import 'error_capture.dart';
 import 'http_capture.dart';
 import 'replay.dart';
 import 'storage.dart';
+import 'struggle_watcher.dart';
 import 'transport.dart';
 
 /// The app-facing API. Every method is a safe no-op before [init], when
@@ -20,6 +21,7 @@ class VectorSignal {
   static _LifecycleObserver? _lifecycle;
   static ReplayRecorder? _replay;
   static ReplayUploader? _replayUploader;
+  static StruggleWatcher? _struggleWatcher;
 
   /// The area session replay captures. [VectorSignalTapCapture] places it
   /// around the app, so wrapping the app in that widget is all that's needed.
@@ -87,8 +89,11 @@ class VectorSignal {
       // API calls recorded by the Android VectorSignalOkHttpInterceptor.
       if (captureNativeApi) unawaited(NativeApiBridge.start());
 
-      // Session replay: masked frames, only for sampled sessions.
-      if (replay != null && replay.sampleRate > 0) {
+      // Session replay: masked frames. Sampled sessions are recorded in full;
+      // the others keep the last minute on the device and send it only when
+      // a struggle happens.
+      if (replay != null &&
+          (replay.sampleRate > 0 || replay.onStruggleSampleRate > 0)) {
         final uploader = ReplayUploader(writeKey: writeKey, host: host);
         _replayUploader = uploader;
         _replay = ReplayRecorder(
@@ -99,6 +104,11 @@ class VectorSignal {
         )..start();
         _lifecycle!.replay = _replay;
         _lifecycle!.replayUploader = uploader;
+        if (replay.onStruggleSampleRate > 0) {
+          final watcher = StruggleWatcher((_) => _replay?.onStruggle());
+          _struggleWatcher = watcher;
+          client.onEvent = watcher.onEvent;
+        }
       }
 
       if (kDebugMode) {
@@ -141,12 +151,19 @@ class VectorSignal {
   /// Records a tap. [VectorSignalTapCapture] calls this for you.
   /// [target] is what the finger hit (`button`, `toggle`, `text`, `none`);
   /// the server only treats `button` taps as possible dead taps.
-  static void recordTap(Offset position, {String? label, String? target}) =>
+  /// [screenSize] (logical pixels) lets heatmaps line up taps from phones of
+  /// different sizes.
+  static void recordTap(Offset position,
+          {String? label, String? target, Size? screenSize}) =>
       _client?.enqueue(
         VectorSignalEvents.tap,
         properties: {
           'x': double.parse(position.dx.toStringAsFixed(1)),
           'y': double.parse(position.dy.toStringAsFixed(1)),
+          if (screenSize != null && !screenSize.isEmpty) ...{
+            'w': double.parse(screenSize.width.toStringAsFixed(1)),
+            'h': double.parse(screenSize.height.toStringAsFixed(1)),
+          },
           if (label != null) 'label': label,
           if (target != null) 'target': target,
         },
@@ -198,6 +215,8 @@ class VectorSignal {
   @visibleForTesting
   static void shutdown() {
     unawaited(NativeApiBridge.stop());
+    _struggleWatcher?.dispose();
+    _struggleWatcher = null;
     _replay?.stop();
     _replay = null;
     _replayUploader?.dispose();
